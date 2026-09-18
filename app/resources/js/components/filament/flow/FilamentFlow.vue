@@ -5,7 +5,7 @@ import { useFilamentStore } from '../../../stores/filament';
 import { usePrinterStore } from '../../../stores/printer';
 import { useToastStore } from '../../../stores/toasts';
 import { useNow } from '../../../composables/useNow';
-import { ACTION_LABELS, canCancel, isEnded, showsOldFilament, stepActions, stepProgress, stepTitle } from '../../../filament/walkthrough';
+import { ACTION_LABELS, canCancel, isEnded, showsOldFilament, stepActions, stepDescription, stepProgress, stepTitle } from '../../../filament/walkthrough';
 import { formatTemp } from '../../../format';
 import AppButton from '../../AppButton.vue';
 import ExtruderScene from './ExtruderScene.vue';
@@ -31,12 +31,13 @@ const state = computed(() => change.current);
 const ended = computed(() => isEnded(state.value));
 const progress = computed(() => stepProgress(state.value, now.value));
 const title = computed(() => stepTitle(state.value));
+const description = computed(() => stepDescription(state.value));
 const actions = computed(() => stepActions(state.value));
 const heading = computed(() => ACTION_LABELS[state.value?.action] ?? 'Filament');
 const subject = computed(() => state.value?.spool?.name || state.value?.material || null);
 const hotend = computed(() => printer.hotend);
 const heating = computed(() => state.value?.step === 'heating');
-const motion = computed(() => ['loading', 'purging', 'unloading'].includes(state.value?.step));
+const motion = computed(() => ['loading', 'purging', 'unloading', 'printer_load', 'printer_unload'].includes(state.value?.step));
 const Button = computed(() => (props.touch ? PanelButton : AppButton));
 
 const temperature = computed(() => {
@@ -48,7 +49,7 @@ const temperature = computed(() => {
 watch(
   () => state.value?.step,
   (step) => {
-    if (step === 'done') setTimeout(() => filament.load().catch(() => {}), 2500);
+    if (['done', 'cancelled', 'error'].includes(step)) setTimeout(() => filament.load().catch(() => {}), 2500);
   },
 );
 
@@ -97,7 +98,10 @@ async function cancel() {
         </div>
 
         <div class="flex min-w-0 flex-1 flex-col justify-center gap-4">
-          <div class="font-semibold" :class="touch ? 'text-2xl' : 'text-lg'">{{ title }}</div>
+          <div aria-live="polite" class="flex flex-col gap-2">
+            <div class="font-semibold" :class="touch ? 'text-2xl' : 'text-lg'">{{ title }}</div>
+            <p v-if="description" class="text-sm leading-relaxed text-zinc-400">{{ description }}</p>
+          </div>
 
           <div v-if="heating" class="flex items-center gap-4">
             <ProgressRing v-if="touch" :value="progress" :size="112" :stroke="10" tone="amber">

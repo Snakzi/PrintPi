@@ -21,10 +21,14 @@ top. Built for my Prusa MK4S, works with any printer that speaks Marlin over a U
 - Updates from the settings page, printer firmware updates too
 - A touch panel for a 7" screen at the printer
 
-The filament walkthrough drives the extruder itself with plain G-code, so it works on any Marlin
-printer and asks its questions on the panel or the phone, not on the printer's display. On a Prusa,
-switch the filament sensor's autoload off first, or the printer starts a load of its own the moment
-it sees the filament.
+On Prusa Buddy printers such as the MK4S, the filament walkthrough starts the firmware's native
+load/unload routine. Start it in PrintPi before inserting filament, then follow the printer display
+for insertion, colour checks and stopping. PrintPi shows short instructions and asks you to confirm
+the result before updating the loaded spool or continuing a change. The stock firmware controls
+heating, sensors, parking and retraction; no firmware modification is needed.
+
+Other Marlin printers use the host-driven walkthrough, with questions on the panel or phone.
+Disable the printer's own autoload when using that path so it does not start a second load.
 
 ## Screenshots
 

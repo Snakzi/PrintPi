@@ -1,21 +1,10 @@
-"""Filament load, unload and change as a walkthrough PrintPi drives step by step.
+"""Filament walkthroughs for the web app and touch panel.
 
-The firmware's own load (M701 on Marlin and Buddy) does the mechanics well enough,
-but it ends in a question on the printer's display that no host can answer over
-serial, and it says nothing about its progress on the wire. So the runner does the
-steps itself with plain G-codes: heat, push the filament in at the printer's own
-speeds, purge, ask whether the colour runs clean, and for an unload shape the tip
-with the printer's ramming sequence before pulling the filament out. Every step and
-every question lives in PrintPi's state, so the touch panel and the web app show
-the same walkthrough and either one can answer. The lengths and speeds come from
-the printer profile, so a bowden printer loads its 400 mm and an MK4S Prusa's
-30 + 50 mm.
-
-On Buddy firmware the runner also tells the printer which filament is in (M865 with
-L0), so its display and a print from its USB drive agree with PrintPi, and it
-blocks the extruder stall detection (M591) during a load the way the firmware does
-for its own. The printer's autoload has to be off on such printers: it would start
-a load of its own the moment its sensor sees the filament.
+Buddy owns its load/unload mechanics and display dialogs through M701/M702,
+including sensor locks, parking, tip shaping and auto retraction. Its serial
+acknowledgement does not distinguish completion from a user abort: PrintPi asks
+for the outcome before recording inventory or starting the next operation.
+Other firmware keeps the host-driven walkthrough with profile-specific moves.
 """
 
 from __future__ import annotations
@@ -41,13 +30,19 @@ STEPS = {
     # A change heats twice: for the filament coming out, then for the one going in.
     "change": ("heating", "unloading", "remove", "heating", "insert", "loading", "purging", "check", "done"),
 }
-# Steps that wait for the user: Continue on insert and remove, an answer on check.
-WAITING_STEPS = ("insert", "remove", "check")
+FIRMWARE_STEPS = {
+    "load": ("printer_load", "confirm_loaded", "done"),
+    "unload": ("printer_unload", "confirm_unloaded", "done"),
+    "change": ("printer_unload", "confirm_unloaded", "printer_load", "confirm_loaded", "done"),
+}
+CONTINUE_STEPS = ("insert", "remove", "confirm_loaded", "confirm_unloaded")
+# Steps that wait for a PrintPi confirmation, or the host-driven colour check.
+WAITING_STEPS = (*CONTINUE_STEPS, "check")
 END_STEPS = ("done", "cancelled", "error")
 ANSWERS = ("yes", "purge")
 HEAT_TIMEOUT = 600.0
 HEAT_TOLERANCE = 3.0  # °C below the target that counts as reached, like the firmware's own loads
-# Buddy's preset filament types, which M865 S"…" selects by name; anything else becomes a custom type.
+# Buddy's preset filament types, which M701 S"…" selects by name; anything else becomes a custom type.
 BUDDY_PRESETS = {"PLA", "PETG", "ASA", "PC", "PVB", "ABS", "HIPS", "PP", "FLEX", "PA"}
 BUDDY_ALIASES = {"TPU": "FLEX"}
 BUDDY_NAME_LENGTH = 7  # the firmware's name buffer, terminator excluded
@@ -76,8 +71,9 @@ class _Cancelled(Exception):
 @dataclass
 class FilamentState:
     action: str  # load | unload | change
+    backend: str = "host"  # firmware: native dialogs on the printer, host: PrintPi drives the moves
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    step: str = "heating"  # one of STEPS[action], or cancelled | error
+    step: str = "heating"  # one of the backend's steps, or cancelled | error
     steps: tuple[str, ...] = ()
     step_index: int = 0  # where in `steps` the walkthrough is; a change heats twice, so the name alone is ambiguous
     waiting: bool = False  # the step needs Continue or an answer
@@ -104,16 +100,20 @@ class FilamentState:
         return data
 
 
-def buddy_filament_gcode(material: str | None, nozzle: int | None) -> str:
-    """The M865 that tells a Buddy printer what is loaded: a preset by name, else a custom type
-    with the material's temperatures, named after the material as far as its 7 characters go."""
+def buddy_load_commands(material: str | None, nozzle: int | None) -> list[str]:
+    """Select a native preset, or prepare a pending custom material before loading it.
+
+    Never force the loaded type with M865 L: the native routine owns that state,
+    and a command acknowledgement alone does not mean its load succeeded.
+    W2 enables the firmware's preheat and Return option, using its default lengths.
+    """
     name = _NAME_RE.sub("", (material or "").upper().replace(" ", "-").replace("_", "-"))
     preset = BUDDY_ALIASES.get(name, name)
     if preset in BUDDY_PRESETS:
-        return f'M865 S"{preset}" L0'
+        return [f'M701 W2 S"{preset}"']
     name = name[:BUDDY_NAME_LENGTH] or "CUSTOM"
     temp = int(nozzle or 215)
-    return f'M865 X R N"{name}" T{temp} P{min(BUDDY_PREHEAT_TEMP, temp)} L0'
+    return [f'M865 X R N"{name}" T{temp} P{min(BUDDY_PREHEAT_TEMP, temp)}', 'M701 W2 S"#"']
 
 
 def moves_duration(moves: list[list[float]]) -> float:
@@ -197,9 +197,13 @@ class FilamentRunner:
             self._unload_nozzle = int(unload_nozzle) if unload_nozzle else (int(nozzle) if nozzle else None)
             self._proceed = self._cancelled = False
             self._answer = None
+            native = printer.firmware_family == "buddy"
+            steps = FIRMWARE_STEPS[action] if native else STEPS[action]
             state = FilamentState(
                 action=action,
-                steps=STEPS[action],
+                backend="firmware" if native else "host",
+                steps=steps,
+                step=steps[0],
                 spool=self._spool_summary(spool),
                 material=str(material) if material else (spool or {}).get("material"),
                 nozzle=int(nozzle) if nozzle else self._unload_nozzle,
@@ -212,10 +216,10 @@ class FilamentRunner:
             return copy.copy(state)
 
     def proceed(self) -> None:
-        """Continue after the user inserted or pulled out the filament."""
+        """Continue after insertion/removal, or confirm a native operation's outcome."""
         with self._cv:
             state = self._state
-            if state is None or not state.active or state.step not in ("insert", "remove"):
+            if state is None or not state.active or state.step not in CONTINUE_STEPS:
                 raise FilamentError("nothing to continue")
             self._proceed = True
             self._cv.notify_all()
@@ -236,6 +240,8 @@ class FilamentRunner:
             state = self._state
             if state is None or not state.active:
                 raise FilamentError("no filament change is running")
+            if state.backend == "firmware" and not state.waiting:
+                raise FilamentError("cancel this operation on the printer display")
             self._cancelled = True
             self._cv.notify_all()
 
@@ -251,20 +257,50 @@ class FilamentRunner:
     # ---- the walkthrough -----------------------------------------------------------
 
     def _run(self, state: FilamentState, printer: Printer) -> None:
-        buddy = printer.firmware_family == "buddy"
         try:
-            if state.action in ("unload", "change"):
-                self._unload_phase(state, printer)
-            if state.action in ("load", "change"):
-                self._load_phase(state, printer, buddy)
-            self._end(state, printer, "done", buddy=buddy)
+            if state.backend == "firmware":
+                self._native_walkthrough(state, printer)
+            else:
+                if state.action in ("unload", "change"):
+                    self._unload_phase(state, printer)
+                if state.action in ("load", "change"):
+                    self._load_phase(state, printer)
+            self._check_cancelled()
+            self._end(state, printer, "done")
         except _Cancelled:
-            self._end(state, printer, "cancelled", buddy=buddy)
+            self._end(state, printer, "cancelled")
         except PrinterError as exc:
-            self._end(state, printer, "error", str(exc), buddy=buddy)
+            self._end(state, printer, "error", str(exc))
         except Exception as exc:  # noqa: BLE001 - never leave the walkthrough stuck
             log.exception("filament %s failed", state.action)
-            self._end(state, printer, "error", f"{type(exc).__name__}: {exc}", buddy=buddy)
+            self._end(state, printer, "error", f"{type(exc).__name__}: {exc}")
+
+    def _native_walkthrough(self, state: FilamentState, printer: Printer) -> None:
+        if state.action in ("unload", "change"):
+            self._set_step(state, "printer_unload")
+            self._native_send(printer, "M702 W2")
+            # Also covers an unknown loaded type or Stop before the filament moved.
+            # Do not infer success from 'ok' or from M865's loaded-material metadata.
+            self._wait_for_user(state, printer, "confirm_unloaded")
+            self._check_cancelled()
+            self._record("unloaded", None)
+        if state.action in ("load", "change"):
+            self._set_step(state, "printer_load")
+            for command in buddy_load_commands(state.material, state.nozzle):
+                self._native_send(printer, command)
+            self._wait_for_user(state, printer, "confirm_loaded")
+            self._check_cancelled()
+            self._record("loaded", state.spool)
+
+    def _native_send(self, printer: Printer, command: str) -> None:
+        self._check_cancelled()
+        response = printer.send(command)
+        self._check_cancelled()
+        # Marlin also acknowledges rejected/unknown commands. Never offer success
+        # confirmation (or fall back to manual extrusion) after such a response.
+        for line in response:
+            if re.search(r"^(?:echo:\s*)?(?:error:|unknown command\b|invalid\b|unsupported\b)", line.strip(), re.IGNORECASE):
+                raise FilamentError(f"Printer rejected {command.split()[0]}: {line}")
 
     def _unload_phase(self, state: FilamentState, printer: Printer) -> None:
         self._heat(state, printer, self._unload_nozzle or state.nozzle or 0)
@@ -274,21 +310,18 @@ class FilamentRunner:
         self._record("unloaded", None)
         self._wait_for_user(state, printer, "remove")
 
-    def _load_phase(self, state: FilamentState, printer: Printer, buddy: bool) -> None:
-        if buddy:
-            printer.send("M591 S0")  # the loadcell would read the push into an empty extruder as a stall
+    def _load_phase(self, state: FilamentState, printer: Printer) -> None:
         self._heat(state, printer, state.nozzle or 0)
         self._wait_for_user(state, printer, "insert")
         self._heat(state, printer, state.nozzle or 0)  # the printer's safety timer may have cooled it meanwhile
         self._motion(state, printer, "loading", self._moves["load"])
         while True:
+            self._heat(state, printer, state.nozzle or 0)
             self._motion(state, printer, "purging", self._moves["purge"])
             with self._lock:
                 state.purges += 1
             if self._ask(state, printer) == "yes":
                 break
-        if buddy:
-            printer.send(buddy_filament_gcode(state.material, state.nozzle))
         self._record("loaded", state.spool)
 
     def _heat(self, state: FilamentState, printer: Printer, target: int) -> None:
@@ -305,6 +338,8 @@ class FilamentRunner:
         deadline = time.monotonic() + HEAT_TIMEOUT
         last_poll = time.monotonic()
         while True:
+            if not printer.connected:
+                raise PrinterError("printer disconnected while heating")
             reading = printer.state.temperatures.get("T0")
             actual = reading.actual if reading is not None else start
             if actual >= target - HEAT_TOLERANCE:
@@ -334,9 +369,12 @@ class FilamentRunner:
 
     def _wait_for_user(self, state: FilamentState, printer: Printer, step: str) -> None:
         with self._cv:
+            self._check_cancelled()
             self._proceed = False
             self._set_step(state, step, waiting=True)
             while not self._proceed:
+                if not printer.connected:
+                    raise PrinterError("printer disconnected while waiting for filament")
                 if self._cancelled:
                     raise _Cancelled()
                 self._cv.wait(0.5)
@@ -346,13 +384,17 @@ class FilamentRunner:
             self._answer = None
             self._set_step(state, "check", waiting=True)
             while self._answer is None:
+                if not printer.connected:
+                    raise PrinterError("printer disconnected during the colour check")
                 if self._cancelled:
                     raise _Cancelled()
                 self._cv.wait(0.5)
             return self._answer
 
-    def _end(self, state: FilamentState, printer: Printer, step: str, error: str | None = None, *, buddy: bool = False) -> None:
-        for command in (["M591 R"] if buddy and state.action != "unload" else []) + ["M104 S0"]:
+    def _end(self, state: FilamentState, printer: Printer, step: str, error: str | None = None) -> None:
+        # Buddy restores its own temperature, coordinate modes and sensor locks.
+        # In particular, leave the successful load's preheat/auto-retract intact.
+        for command in ([] if state.backend == "firmware" else ["M104 S0"]):
             try:
                 printer.send(command)
             except PrinterError as exc:
@@ -406,6 +448,11 @@ class FilamentRunner:
         if step in END_STEPS:
             return state.step_index
         for index in range(state.step_index, len(state.steps)):
+            if state.steps[index] == step:
+                return index
+        # Reheating and purging can repeat after a user pause. In a change,
+        # return to the loading heat-up, never to the old filament's unload.
+        for index in range(state.step_index - 1, -1, -1):
             if state.steps[index] == step:
                 return index
         return state.step_index

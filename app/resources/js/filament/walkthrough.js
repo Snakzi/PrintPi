@@ -15,6 +15,10 @@ export const STEP_LABELS = {
   loading: 'Loading',
   purging: 'Purging',
   check: 'Colour',
+  printer_unload: 'Unload on printer',
+  confirm_unloaded: 'Confirm removal',
+  printer_load: 'Load on printer',
+  confirm_loaded: 'Confirm loading',
   done: 'Done',
   cancelled: 'Cancelled',
   error: 'Failed',
@@ -24,6 +28,14 @@ export const STEP_LABELS = {
 export function stepTitle(state) {
   if (!state) return '';
   switch (state.step) {
+    case 'printer_unload':
+      return 'Follow the printer display to unload';
+    case 'printer_load':
+      return 'Follow the printer display to load';
+    case 'confirm_unloaded':
+      return 'Has the old filament been removed?';
+    case 'confirm_loaded':
+      return 'Did loading finish successfully?';
     case 'heating':
       return state.target || state.nozzle ? `Heating to ${state.target || state.nozzle} °C` : 'Heating';
     case 'unloading':
@@ -44,6 +56,40 @@ export function stepTitle(state) {
       return 'Cancelled';
     case 'error':
       return state.error || 'Failed';
+    default:
+      return '';
+  }
+}
+
+/** Short instructions shared by the web modal and the touch panel. */
+export function stepDescription(state) {
+  if (!state) return '';
+  switch (state.step) {
+    case 'printer_unload':
+      return 'Choose the current material on the printer if asked. Wait for unloading, then pull the filament out when prompted. To stop, use the printer display.';
+    case 'printer_load':
+      return 'Insert filament when the printer asks. Check the colour at the nozzle and choose Yes or Purge more on its display. To stop, use the printer display.';
+    case 'confirm_unloaded':
+      return 'Confirm only after the printer has finished and you have pulled out the old filament. If you stopped the operation or it failed, choose Cancel.';
+    case 'confirm_loaded':
+      return 'Confirm only if you accepted the clean colour on the printer. This saves the loaded spool in PrintPi. If you stopped loading or it failed, choose Cancel.';
+    case 'heating':
+      return 'Wait for the nozzle to reach the required temperature.';
+    case 'insert':
+      return 'Feed the filament into the extruder, then choose Continue.';
+    case 'remove':
+      return 'Pull out the loose filament, then choose Continue.';
+    case 'loading':
+    case 'unloading':
+      return 'Wait while the extruder moves the filament.';
+    case 'purging':
+      return 'Wait for filament to flow from the nozzle.';
+    case 'check':
+      return 'Choose Yes, clean when only the new colour comes out, or Purge more to flush again.';
+    case 'cancelled':
+      return state.backend === 'firmware' ? 'The result was not confirmed. Check the filament in the printer before starting again.' : '';
+    case 'error':
+      return state.backend === 'firmware' ? 'Check the printer display. Finish or stop any open filament dialog there before trying again.' : '';
     default:
       return '';
   }
@@ -88,7 +134,7 @@ export function showsOldFilament(state) {
   if (!state) return false;
   if (state.action === 'unload') return true;
   if (state.action !== 'change') return false;
-  const remove = (state.steps ?? []).indexOf('remove');
+  const remove = (state.steps ?? []).indexOf(state.backend === 'firmware' ? 'confirm_unloaded' : 'remove');
   return remove !== -1 && (state.step_index ?? 0) <= remove;
 }
 
@@ -113,6 +159,10 @@ export function stepProgress(state, now = Date.now()) {
 export function stepActions(state) {
   if (!state) return [];
   switch (state.step) {
+    case 'confirm_unloaded':
+      return [{ id: 'continue', label: 'Yes, removed', variant: 'primary', icon: 'check' }];
+    case 'confirm_loaded':
+      return [{ id: 'continue', label: 'Yes, loaded', variant: 'primary', icon: 'check' }];
     case 'insert':
     case 'remove':
       return [{ id: 'continue', label: 'Continue', variant: 'primary', icon: 'check' }];
@@ -130,7 +180,7 @@ export function stepActions(state) {
   }
 }
 
-/** Whether the step can still be cancelled: anything before the end. */
+/** Stock Buddy dialogs must be stopped on the printer; only the result check is local. */
 export function canCancel(state) {
-  return Boolean(state) && !isEnded(state);
+  return Boolean(state) && !isEnded(state) && (state.backend !== 'firmware' || state.waiting === true);
 }

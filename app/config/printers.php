@@ -25,11 +25,11 @@ $bowden = [
     'purge' => [50, 180],
     'unload' => [[5, 600], [-20, 3000], [-450, 3000]],
 ];
-// Prusa's Nextruder (MK4, MK4S, XL, CORE One): lengths and the unload ramming sequence from Prusa-Firmware-Buddy.
+// MK4/S and XL, Buddy 6.5.7. Ramming already retracts the entire unload length.
 $nextruder = [
-    'load' => [[30, 360], [50, 1500]],
-    'purge' => [27, 180],
-    'unload' => [[8, 995], [-43, 6000], [-8, 3000], [-4, 1800], [20, 600], [-20, 470], [55, 1740], [-55, 6000], [20, 340], [-20, 210], [-50, 2000], [-105, 1500]],
+    'load' => [[30, 324], [50, 1080]],
+    'purge' => [27, 162],
+    'unload' => [[8, 995], [-43, 6000], [-8, 3000], [-4, 1800], [20, 600], [-20, 470], [55, 1740], [-55, 6000], [20, 340], [-20, 210], [-50, 2000]],
 ];
 $coreOne = ['load' => [[40, 360], [20, 1500]], 'purge' => [40, 180]] + $nextruder;
 // The MK3 family's extruder, with the ramming Buddy uses on the MK3.5.

@@ -10,7 +10,8 @@ import time
 
 import pytest
 
-from printpi_daemon.filament import FilamentError
+from printpi_daemon.filament import FilamentError, FilamentState
+from printpi_daemon.firmware import FirmwareError
 from printpi_daemon.bridge import (
     EVENTS_CHANNEL, FILAMENT_DONE_KEY, JOBS_DONE_KEY, STATE_CHANNEL, FAKE_PORT, RedisBridge, list_ports, printer_power_watts,
 )
@@ -118,6 +119,24 @@ def test_gcode_without_connection_raises(bridge):
     # The worker thread turns this into an error event on printpi:events.
     with pytest.raises(PrinterError, match="not connected"):
         bridge._execute({"type": "gcode", "command": "G28"})
+
+
+@pytest.mark.parametrize("step", ["printer_load", "confirm_loaded"])
+def test_native_filament_blocks_manual_plugin_and_firmware_commands_but_not_emergency_stop(bridge, step):
+    bridge._execute({"type": "connect"})
+    bridge.filament._state = FilamentState("load", backend="firmware", step=step)
+    with pytest.raises(PrinterError, match="filament"):
+        bridge._execute({"type": "gcode", "command": "G28"})
+    with pytest.raises(PrinterError, match="filament"):
+        bridge.plugins._send_gcode("M104 S0", 1.0)
+    with pytest.raises(FirmwareError, match="filament"):
+        bridge._execute({"type": "firmware_flash", "method": "buddy"})
+    with pytest.raises(FirmwareError, match="filament"):
+        bridge._execute({"type": "firmware_files"})
+    assert "G28" not in bridge.printer._port.commands
+    assert "M104 S0" not in bridge.printer._port.commands
+    bridge._execute({"type": "emergency_stop"})
+    assert bridge.printer.state.status == "halted"
 
 
 def test_disconnect_and_unknown_command(bridge):

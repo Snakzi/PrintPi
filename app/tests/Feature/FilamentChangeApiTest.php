@@ -32,7 +32,8 @@ class FilamentChangeApiTest extends TestCase
                 return $action === 'load'
                     && $summary === ['id' => $spool->id, 'name' => 'Galaxy Black', 'material' => 'PETG', 'color' => '#26262e']
                     && $material === 'PETG' && $nozzle === 230 && $unloadNozzle === null
-                    && $moves['purge'] === [27, 180] && $moves['load'] === [[30, 360], [50, 1500]] && count($moves['unload']) === 12;
+                    && $moves['purge'] === [27, 162] && $moves['load'] === [[30, 324], [50, 1080]]
+                    && array_sum(array_column($moves['unload'], 0)) === -97;
             });
         });
 
@@ -112,6 +113,7 @@ class FilamentChangeApiTest extends TestCase
     {
         $this->mock(PrinterBridge::class, function (MockInterface $mock): void {
             $mock->shouldReceive('hasActiveFilament')->andReturn(true);
+            $mock->shouldReceive('activeFilament')->andReturn(['backend' => 'host', 'step' => 'check']);
             $mock->shouldReceive('continueFilament')->once();
             $mock->shouldReceive('answerFilament')->once()->with('purge');
             $mock->shouldReceive('cancelFilament')->once();
@@ -131,6 +133,36 @@ class FilamentChangeApiTest extends TestCase
         });
 
         $this->postJson(route('printer.filament.continue'))->assertStatus(409)->assertJsonPath('message', 'No filament change is running.');
+    }
+
+    public function test_native_display_questions_cannot_be_answered_or_cancelled_from_the_app(): void
+    {
+        $this->mock(PrinterBridge::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('hasActiveFilament')->andReturn(true);
+            $mock->shouldReceive('activeFilament')->andReturn(['backend' => 'firmware', 'step' => 'printer_load', 'waiting' => false]);
+            $mock->shouldNotReceive('continueFilament');
+            $mock->shouldNotReceive('answerFilament');
+            $mock->shouldNotReceive('cancelFilament');
+        });
+
+        foreach (['continue', 'answer', 'cancel'] as $action) {
+            $this->postJson(route('printer.filament.'.$action), ['answer' => 'yes'])
+                ->assertStatus(409)
+                ->assertJsonPath('message', 'Follow the instructions on the printer display. Stop the operation there if needed.');
+        }
+    }
+
+    public function test_the_native_result_can_be_confirmed_or_rejected_after_the_display_dialog_ends(): void
+    {
+        $this->mock(PrinterBridge::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('hasActiveFilament')->andReturn(true);
+            $mock->shouldReceive('activeFilament')->andReturn(['backend' => 'firmware', 'step' => 'confirm_loaded', 'waiting' => true]);
+            $mock->shouldReceive('continueFilament')->once();
+            $mock->shouldReceive('cancelFilament')->once();
+        });
+
+        $this->postJson(route('printer.filament.continue'))->assertStatus(202)->assertJsonPath('queued', true);
+        $this->postJson(route('printer.filament.cancel'))->assertStatus(202)->assertJsonPath('queued', true);
     }
 
     public function test_the_state_poll_books_what_the_walkthrough_loaded_and_unloaded(): void

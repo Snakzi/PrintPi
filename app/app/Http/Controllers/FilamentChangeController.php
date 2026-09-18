@@ -69,6 +69,8 @@ class FilamentChangeController extends Controller
     private function ensureRunning(): void
     {
         abort_unless($this->bridge->hasActiveFilament(), 409, 'No filament change is running.');
+        $filament = $this->bridge->activeFilament();
+        abort_if(($filament['backend'] ?? null) === 'firmware' && ! ($filament['waiting'] ?? false), 409, 'Follow the instructions on the printer display. Stop the operation there if needed.');
     }
 
     private function queued(): JsonResponse

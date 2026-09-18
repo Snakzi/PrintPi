@@ -189,7 +189,7 @@ class RedisBridge:
             save_state=self._save_plugin_state,
             on_requirements_installed=self._remember_requirements,
             # Looked up per call: "connect" may replace self.printer with one for another port.
-            send_gcode=lambda command, timeout: self.printer.send(command, timeout=timeout),
+            send_gcode=self._send_manual_gcode,
             status_changed=self._publish_plugin_status,
             printer_control=self._plugin_printer_control,
             printer_ports=lambda: [entry["device"] for entry in list_ports()],
@@ -554,10 +554,17 @@ class RedisBridge:
                 log.exception("command failed")
                 self._event("error", command=command, message=str(exc))
 
+    def _send_manual_gcode(self, command: str, timeout: float | None = None) -> list[str]:
+        # Do not queue manual/plugin moves behind a blocking native dialog or
+        # change heaters/modes between two stages of a filament walkthrough.
+        if self.filament.active:
+            raise PrinterError("cannot send manual commands while filament is being changed")
+        return self.printer.send(command, timeout=timeout)
+
     def _execute(self, command: dict) -> None:
         kind = command.get("type")
         if kind == "gcode":
-            response = self.printer.send(str(command.get("command", "")))
+            response = self._send_manual_gcode(str(command.get("command", "")))
             self._event("gcode", command=command, response=response)
         elif kind == "connect":
             self._connect(str(command.get("port") or self.printer.port_url),
@@ -638,8 +645,12 @@ class RedisBridge:
             self.filament.cancel()
             self._event("filament_cancelled")
         elif kind == "firmware_files":
+            if self.filament.active:
+                raise FirmwareError("cannot access the printer drive while filament is being changed")
             self._list_firmware_files()
         elif kind == "firmware_flash":
+            if self.filament.active:
+                raise FirmwareError("cannot update the firmware while filament is being changed")
             job = self.jobs.state
             if job is not None and job.active:
                 raise FirmwareError("cannot update the firmware while a print is active")
