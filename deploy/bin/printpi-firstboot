@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Finishes an installation that scripts/build-image.sh prepared in a chroot: the parts of
+# deploy/install.sh that need a running system. Runs once through printpi-firstboot.service
+# and removes its marker; a failure keeps the marker, so the next boot tries again.
+set -euo pipefail
+ENV_DIR=/etc/printpi
+# shellcheck disable=SC1091
+source "$ENV_DIR/install.env"
+APP="$PRINTPI_HOME/current/app"
+RUN_USER="$PRINTPI_USER"
+HOST="$(hostname)"
+
+log() { printf '%s printpi-firstboot: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+log "starting as $(id -un) on $(hostname), release $(cat "$PRINTPI_HOME/current/VERSION" 2>/dev/null || echo '?')"
+
+# The Imager may have chosen another hostname than the image carries.
+sed -i "s|^APP_URL=.*|APP_URL=http://$HOST.local|" "$ENV_DIR/app.env"
+
+if ! grep -q '^APP_KEY=base64:' "$ENV_DIR/app.env"; then
+    log "generating the app key"
+    sudo -u "$RUN_USER" php "$APP/artisan" key:generate --force --quiet --no-interaction
+fi
+
+touch /var/lib/printpi/printpi.sqlite
+chown "$RUN_USER:www-data" /var/lib/printpi/printpi.sqlite
+chmod 664 /var/lib/printpi/printpi.sqlite
+log "migrating the database"
+sudo -u "$RUN_USER" php "$APP/artisan" migrate --force --quiet --no-interaction
+sudo -u "$RUN_USER" php "$APP/artisan" optimize --quiet --no-interaction
+sudo -u "$RUN_USER" php "$APP/artisan" printpi:sync-plugins --quiet --no-interaction \
+    || log "could not hand the plugins to the daemon yet; the next sync in the UI does"
+chgrp -R www-data "$APP/storage" "$APP/bootstrap/cache"
+chmod -R g+rwX "$APP/storage" "$APP/bootstrap/cache"
+
+rm -f "$ENV_DIR/firstboot"
+log "done, PrintPi is at http://$HOST.local"

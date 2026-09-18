@@ -1,0 +1,22 @@
+[Unit]
+Description=PrintPi printer daemon
+After=network-online.target redis-server.service
+Wants=redis-server.service
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+SupplementaryGroups=__GROUPS__
+# Opening /dev/mem needs CAP_SYS_RAWIO on top of the kmem group; the LED strip
+# plugin drives WS281x strips on PWM pins through DMA with it.
+AmbientCapabilities=CAP_SYS_RAWIO
+WorkingDirectory=__HOME__/current/daemon
+EnvironmentFile=/etc/printpi/daemon.env
+ExecStart=/var/lib/printpi/venv/bin/python -m printpi_daemon
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

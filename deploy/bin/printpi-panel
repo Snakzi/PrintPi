@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# The kiosk on the Pi's touch screen: cage runs Chromium full screen on the panel page.
+# Settings come from /etc/printpi/panel.env (see deploy/panel.env.example).
+set -euo pipefail
+
+URL="${PRINTPI_PANEL_URL:-http://127.0.0.1/panel}"
+if [[ -n "${PRINTPI_PANEL_TOKEN:-}" ]]; then
+    URL="${URL%/}/login?token=${PRINTPI_PANEL_TOKEN}"
+fi
+
+if [[ "${PRINTPI_PANEL_INNER:-0}" != "1" ]]; then
+    # Outside cage: start the compositor with this script as its client.
+    export PRINTPI_PANEL_INNER=1
+    exec cage -d -s -- "$0"
+fi
+
+# Inside cage: the screen is put the right way round (and into its native mode) before the
+# browser starts; a display that is upside down on its mount needs only PRINTPI_PANEL_ROTATE=180.
+if command -v wlr-randr >/dev/null; then
+    # The output can appear a few seconds after the compositor; wait for it before configuring,
+    # a call before that only answers "unknown output".
+    OUTPUT="${PRINTPI_PANEL_OUTPUT:-}"
+    for _ in $(seq 1 40); do
+        LISTED="$(wlr-randr 2>/dev/null | awk '/^[^ ]/ {print $1}')"
+        if [[ -n "$OUTPUT" && "$LISTED" == *"$OUTPUT"* ]]; then break; fi
+        if [[ -z "$OUTPUT" && -n "$LISTED" ]]; then OUTPUT="$(printf '%s\n' "$LISTED" | head -1)"; break; fi
+        sleep 0.5
+    done
+    if [[ -n "$OUTPUT" ]]; then
+        # One call per setting, so a mode the screen refuses does not take the rotation with it.
+        [[ -n "${PRINTPI_PANEL_MODE:-}" ]] && { wlr-randr --output "$OUTPUT" --custom-mode "$PRINTPI_PANEL_MODE" || true; }
+        [[ -n "${PRINTPI_PANEL_ROTATE:-}" && "${PRINTPI_PANEL_ROTATE}" != "0" ]] && { wlr-randr --output "$OUTPUT" --transform "$PRINTPI_PANEL_ROTATE" || true; }
+        [[ -n "${PRINTPI_PANEL_SCALE:-}" ]] && { wlr-randr --output "$OUTPUT" --scale "$PRINTPI_PANEL_SCALE" || true; }
+    fi
+fi
+
+exec chromium \
+    --kiosk \
+    --ozone-platform=wayland \
+    --touch-events=enabled \
+    --disable-pinch \
+    --overscroll-history-navigation=0 \
+    --noerrdialogs \
+    --disable-infobars \
+    --disable-session-crashed-bubble \
+    --disable-features=Translate,TranslateUI \
+    --no-first-run \
+    --password-store=basic \
+    --autoplay-policy=no-user-gesture-required \
+    --check-for-update-interval=31536000 \
+    --user-data-dir="${XDG_CONFIG_HOME:-$HOME/.config}/printpi-panel" \
+    "$URL"

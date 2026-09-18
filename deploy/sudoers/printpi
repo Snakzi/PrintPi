@@ -1,0 +1,3 @@
+# The web app (php-fpm runs as www-data) may apply hostname and timezone,
+# reboot the Pi and restart the web server through the validated helper, nothing else.
+www-data ALL=(root) NOPASSWD: /usr/local/bin/printpi-system

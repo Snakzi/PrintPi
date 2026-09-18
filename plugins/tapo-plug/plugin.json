@@ -1,0 +1,61 @@
+{
+  "id": "tapo-plug",
+  "name": "Tapo Plug",
+  "version": "1.3.0",
+  "description": "TP-Link Tapo and Kasa smart plugs on the local network: found automatically, switched from the dashboard, with the power they draw.",
+  "author": "PrintPi",
+  "icon": "bolt",
+  "daemon": true,
+  "settings": [
+    {
+      "key": "username",
+      "label": "TP-Link account email",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "key": "password",
+      "label": "TP-Link account password",
+      "type": "password",
+      "default": ""
+    },
+    {
+      "key": "auto_connect",
+      "label": "Connect printer automatically",
+      "type": "boolean",
+      "default": true
+    },
+    {
+      "key": "auto_off",
+      "label": "Switch the printer off after a print",
+      "type": "boolean",
+      "default": false
+    },
+    {
+      "key": "auto_off_minutes",
+      "label": "Minutes to wait before switching off",
+      "type": "integer",
+      "default": 5,
+      "min": 0,
+      "max": 180
+    }
+  ],
+  "controls": [
+    {
+      "key": "plugs",
+      "label": "Plugs",
+      "type": "devices",
+      "action": "scan",
+      "actions": [
+        "add",
+        "rename",
+        "remove",
+        "turn_on",
+        "turn_off",
+        "set_printer",
+        "printer_power_on",
+        "printer_power_off"
+      ]
+    }
+  ]
+}

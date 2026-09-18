@@ -1,0 +1,2 @@
+# Speaks both the Kasa and the Tapo protocol, discovery included; pure Python apart from cryptography.
+python-kasa>=0.10,<0.11

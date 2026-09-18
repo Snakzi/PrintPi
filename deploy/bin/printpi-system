@@ -1,0 +1,411 @@
+#!/usr/bin/env bash
+# Root helper for the few system actions the PrintPi web app may trigger.
+# Installed to /usr/local/bin; /etc/sudoers.d/printpi lets www-data run it.
+# Every argument is validated here, sudoers grants nothing else.
+set -euo pipefail
+
+# Runs a command a moment later from a transient systemd unit, so the HTTP
+# request that asked for it can still answer before php-fpm or the host goes away.
+deferred() {
+    local delay="$1"
+    shift
+    systemd-run --quiet --collect --on-active="$delay" --description="PrintPi: $*" "$@"
+}
+
+VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+STATUS_DIR=/run/printpi
+STARTED_AT=""
+
+now_iso() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+job_active() { redis-cli get printpi:state 2>/dev/null | grep -Eq '"state": ?"(printing|paused|cancelling)"'; }
+
+# Refuses with a reason: the web app relays stderr when the command is refused at once,
+# and a deferred run writes it into the status file. The code becomes the exit status.
+fail() {
+    REASON="$1"
+    echo "$1" >&2
+    # A deferred run ends here whatever the caller's context; its EXIT trap records the failure.
+    [[ "${RUN_STARTED:-0}" != 1 ]] || exit "${2:-1}"
+    return "${2:-1}"
+}
+
+read_install_env() {
+    [[ -f /etc/printpi/install.env ]] || fail "no update key installed" 3
+    # shellcheck disable=SC1091
+    source /etc/printpi/install.env
+    RELEASE_HOME="${PRINTPI_HOME:-/opt/printpi}"
+    [[ "$RELEASE_HOME" =~ ^/[a-zA-Z0-9_./-]+$ && "$RELEASE_HOME" != / && "$RELEASE_HOME" != *'/../'* && "$RELEASE_HOME" != */.. ]] || fail "invalid PRINTPI_HOME" 2
+    [[ "${PRINTPI_USER:-}" =~ ^[a-z_][a-z0-9_-]*\$?$ ]] && id "$PRINTPI_USER" >/dev/null 2>&1 || fail "invalid PRINTPI_USER" 2
+    RELEASE_HOME="$(realpath -m "$RELEASE_HOME")"
+}
+
+# The status file drives the progress overlay in the web app: `phase` is the coarse
+# stage, `step` the line the installer is on, so the UI can show what happens right now.
+status_write() {
+    local action="$1" version="$2" phase="$3" error="${4:-}" step="${5:-}"
+    [[ -n "$STARTED_AT" ]] || STARTED_AT="$(now_iso)"
+    python3 - "$STATUS_DIR" "$action" "$version" "$phase" "$STARTED_AT" "$error" "$step" "$(now_iso)" <<'PYJSON'
+import json
+import os
+import sys
+import tempfile
+folder, action, version, phase, started, error, step, now = sys.argv[1:]
+fd, temporary = tempfile.mkstemp(prefix='.update.', dir=folder)
+try:
+    with os.fdopen(fd, 'w') as stream:
+        json.dump(dict(action=action, version=version, phase=phase, step=step or None, started_at=started,
+                       finished_at=now if phase in ('done', 'failed') else None,
+                       error=error or None), stream)
+        stream.write('\n')
+        os.fchmod(stream.fileno(), 0o644)
+    os.replace(temporary, os.path.join(folder, 'update.json'))
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PYJSON
+}
+
+validate_update() {
+    [[ $# == 2 && "$1" =~ $VERSION_RE && ( "$2" == stable || "$2" == beta ) ]] || { echo "invalid version or channel" >&2; exit 2; }
+}
+
+require_update_key() {
+    [[ -n "${PRINTPI_UPDATE_URL:-}" && -f /etc/printpi/update.pub ]] || fail "no update key installed" 3
+    [[ "$PRINTPI_UPDATE_URL" =~ ^https://[^[:space:]]+$ ]] || fail "invalid update URL, HTTPS required" 3
+    PRINTPI_UPDATE_URL="${PRINTPI_UPDATE_URL%/}"
+}
+
+refuse_print() {
+    if job_active; then
+        fail "a print job is active" 4
+    fi
+}
+
+take_lock() {
+    install -d -m 755 -o root -g root "$STATUS_DIR"
+    exec 9>"$STATUS_DIR/update.lock"
+    flock -n 9 || fail "an update or rollback is in progress" 5
+}
+
+check_queue() {
+    # The flock serializes queue writers; a fresh queued status bridges the timer delay.
+    # A dead worker releases its flock. An abandoned queue expires after two minutes.
+    if python3 - "$STATUS_DIR/update.json" <<'PYJSON'
+import datetime
+import json
+import sys
+try:
+    with open(sys.argv[1]) as stream:
+        status = json.load(stream)
+    active = status.get('phase') in ('queued', 'downloading', 'verifying', 'unpacking', 'installing', 'switching')
+    started = datetime.datetime.fromisoformat(status['started_at'].replace('Z', '+00:00'))
+    age = (datetime.datetime.now(datetime.timezone.utc) - started).total_seconds()
+    sys.exit(0 if active and status['phase'] == 'queued' and age < 120 else 1)
+except (OSError, ValueError, KeyError, TypeError):
+    sys.exit(1)
+PYJSON
+    then
+        fail "an update or rollback is in progress" 5
+    fi
+}
+
+previous_release() {
+    TARGET="$(readlink -f "$RELEASE_HOME/previous" || true)"
+    [[ "$TARGET" == "$RELEASE_HOME/releases/"* && -f "$TARGET/deploy/install.sh" ]] || fail "nothing to roll back to" 6
+    VERSION="$(cat "$TARGET/VERSION" 2>/dev/null || basename "$TARGET")"
+    # dev is a valid rollback destination, but never a downloadable version.
+    [[ "$VERSION" =~ $VERSION_RE || "$VERSION" == dev ]] || fail "invalid rollback version" 2
+}
+
+phase() {
+    PHASE="$1"
+    STEP=""
+    status_write "$ACTION" "$VERSION" "$PHASE"
+    printf '%s %s\n' "$(now_iso)" "$PHASE"
+}
+
+step() {
+    STEP="$1"
+    status_write "$ACTION" "$VERSION" "$PHASE" "" "$STEP"
+    printf '==> %s\n' "$STEP"
+}
+
+# Runs a release's installer and mirrors its `==> ` progress lines into the status file.
+# The installer announces the symlink switch, which is where the web app blinks.
+run_installer() {
+    local line
+    while IFS= read -r line; do
+        printf '%s\n' "$line"
+        if [[ "$line" == '==> '* ]]; then
+            STEP="${line#==> }"
+            [[ "$STEP" != 'Switching to '* ]] || PHASE=switching
+            status_write "$ACTION" "$VERSION" "$PHASE" "" "$STEP"
+        fi
+    done < <(PRINTPI_USER="$PRINTPI_USER" PRINTPI_HOME="$RELEASE_HOME" bash "$1/deploy/install.sh" 2>&1)
+    wait "$!"
+}
+
+recover_release() {
+    [[ -n "$OLD_CURRENT" && -f "$OLD_CURRENT/deploy/install.sh" ]] || return 0
+    # The single editable venv may already point to the failed release, even before switching.
+    printf '%s Restoring %s after failure\n' "$(now_iso)" "$OLD_CURRENT"
+    if PRINTPI_USER="$PRINTPI_USER" PRINTPI_HOME="$RELEASE_HOME" bash "$OLD_CURRENT/deploy/install.sh"; then
+        if [[ -n "$OLD_PREVIOUS" ]]; then
+            ln -sfn "$OLD_PREVIOUS" "$RELEASE_HOME/previous"
+        else
+            rm -f "$RELEASE_HOME/previous"
+        fi
+        return 0
+    fi
+    # Still restore the active path if the recovery installer itself fails.
+    rm -f "$RELEASE_HOME/current.tmp"
+    ln -s "$OLD_CURRENT" "$RELEASE_HOME/current.tmp" && mv -T "$RELEASE_HOME/current.tmp" "$RELEASE_HOME/current"
+    return 1
+}
+
+run_cleanup() {
+    local code="$?" error what
+    trap - EXIT ERR HUP INT TERM
+    set +e
+    if [[ "$PHASE" != done ]]; then
+        [[ "$code" != 0 ]] || code=1
+        if [[ -n "$REASON" ]]; then
+            error="${REASON^}."
+        else
+            what="${STEP:-$PHASE}"
+            error="Failed while ${what,}."
+        fi
+        if [[ "$INSTALL_STARTED" == 1 ]]; then
+            if recover_release; then
+                error="$error The previous release was restored."
+            else
+                error="$error Restoring the previous release also failed; see update.log."
+            fi
+        fi
+        if [[ "$ACTION" == update && "$NEW_RELEASE" == 1 && "$(readlink -f "$RELEASE_HOME/current")" != "$TARGET" ]]; then
+            rm -rf -- "$TARGET"
+        fi
+        status_write "$ACTION" "$VERSION" failed "$error"
+    fi
+    [[ -z "$UNPACK_DIR" ]] || rm -rf -- "$UNPACK_DIR"
+    [[ -z "$TARBALL" ]] || rm -f -- "$TARBALL" "$TARBALL.minisig"
+    [[ -z "$RELEASE_HOME" ]] || rm -f "$RELEASE_HOME/current.tmp"
+    # Exiting closes fd 9, including on failure; the lock file itself stays in place.
+    exit "$code"
+}
+
+start_run() {
+    take_lock
+    PHASE=queued
+    STEP=""
+    REASON=""
+    INSTALL_STARTED=0
+    NEW_RELEASE=0
+    UNPACK_DIR=""
+    TARBALL=""
+    OLD_CURRENT=""
+    OLD_PREVIOUS=""
+    TARGET=""
+    RELEASE_HOME=""
+    trap run_cleanup EXIT
+    trap 'exit 1' ERR HUP INT TERM
+    RUN_STARTED=1
+    # Reuse the queued timestamp when this worker was started by the public command.
+    STARTED_AT="$(python3 - "$STATUS_DIR/update.json" "$ACTION" "$VERSION" <<'PYJSON'
+import json
+import sys
+try:
+    with open(sys.argv[1]) as stream:
+        status = json.load(stream)
+    if status.get('action') == sys.argv[2] and (sys.argv[2] == 'rollback' or status.get('version') == sys.argv[3]) and status.get('phase') == 'queued':
+        print(status['started_at'])
+except (OSError, ValueError, KeyError, TypeError):
+    pass
+PYJSON
+)"
+    install -d -m 755 /var/log/printpi
+    exec >>/var/log/printpi/update.log 2>&1
+    printf '\n%s %s %s\n' "$(now_iso)" "$ACTION" "$VERSION"
+    read_install_env
+    refuse_print
+    OLD_CURRENT="$(readlink -f "$RELEASE_HOME/current" || true)"
+    OLD_PREVIOUS="$(readlink -f "$RELEASE_HOME/previous" || true)"
+}
+
+backup_database() {
+    local old_version=unknown backup
+    local -a backups
+    [[ -f /var/lib/printpi/printpi.sqlite ]] || return 0
+    if [[ -f "$OLD_CURRENT/VERSION" ]]; then
+        old_version="$(cat "$OLD_CURRENT/VERSION")"
+        [[ "$old_version" =~ $VERSION_RE ]] || old_version=unknown
+    fi
+    install -d -m 2775 -o "$PRINTPI_USER" -g www-data /var/lib/printpi/backups
+    backup="/var/lib/printpi/backups/printpi-$old_version-$(date -u '+%Y%m%d-%H%M%S').sqlite"
+    cp /var/lib/printpi/printpi.sqlite "$backup"
+    chown "$PRINTPI_USER:www-data" "$backup"
+    chmod 660 "$backup"
+    mapfile -t backups < <(find /var/lib/printpi/backups -maxdepth 1 -type f -name 'printpi-*.sqlite' -printf '%T@ %p\n' | sort -nr | cut -d' ' -f2-)
+    if [[ ${#backups[@]} -gt 3 ]]; then
+        rm -f -- "${backups[@]:3}"
+    fi
+}
+
+run_update() {
+    start_run
+    require_update_key
+    TARGET="$RELEASE_HOME/releases/$VERSION"
+    local reuse=0
+    if [[ "$TARGET" == "$OLD_CURRENT" ]]; then
+        fail "$VERSION is already the running release"
+    elif [[ "$TARGET" == "$OLD_PREVIOUS" ]]; then
+        # Still on disk from before the last switch (after a rollback or a dev deploy): switching
+        # back needs no download, and replacing the directory would destroy the rollback target.
+        [[ -f "$TARGET/deploy/install.sh" && "$(cat "$TARGET/VERSION" 2>/dev/null)" == "$VERSION" ]] \
+            || fail "the previous release $VERSION is damaged, see update.log"
+        reuse=1
+        printf '%s reusing %s\n' "$(now_iso)" "$TARGET"
+    fi
+    if [[ "$reuse" == 0 ]]; then
+        phase downloading
+        install -d -m 755 "$RELEASE_HOME/downloads" "$RELEASE_HOME/releases"
+        TARBALL="$RELEASE_HOME/downloads/printpi-$VERSION.tar.gz"
+        rm -f -- "$TARBALL" "$TARBALL.minisig"
+        curl -fsSL --proto '=https' --proto-redir '=https' --max-time 900 -o "$TARBALL" "$PRINTPI_UPDATE_URL/$CHANNEL/printpi-$VERSION.tar.gz"
+        curl -fsSL --proto '=https' --proto-redir '=https' --max-time 900 -o "$TARBALL.minisig" "$PRINTPI_UPDATE_URL/$CHANNEL/printpi-$VERSION.tar.gz.minisig"
+        phase verifying
+        minisign -Vq -p /etc/printpi/update.pub -m "$TARBALL"
+        phase unpacking
+        UNPACK_DIR="$RELEASE_HOME/releases/.$VERSION.tmp"
+        rm -rf -- "$UNPACK_DIR"
+        mkdir "$UNPACK_DIR"
+        # A signed archive must still have the agreed single directory and no traversal paths.
+        tar -tzf "$TARBALL" > "$UNPACK_DIR/.archive-list"
+        while IFS= read -r member; do
+            [[ "$member" == "printpi-$VERSION/"* && "$member" != *'/../'* && "$member" != */.. ]] || fail "invalid archive path"
+        done < "$UNPACK_DIR/.archive-list"
+        rm "$UNPACK_DIR/.archive-list"
+        # Archives packed on a Mac carry Apple xattr headers GNU tar would otherwise warn about per file.
+        tar -xzf "$TARBALL" -C "$UNPACK_DIR" --strip-components=1 --no-same-owner --no-same-permissions --warning=no-unknown-keyword
+        [[ "$(cat "$UNPACK_DIR/VERSION")" == "$VERSION" && -f "$UNPACK_DIR/deploy/install.sh" ]] || fail "the archive does not contain release $VERSION"
+        rm -rf -- "$TARGET"
+        NEW_RELEASE=1
+        mv "$UNPACK_DIR" "$TARGET"
+        UNPACK_DIR=""
+        chown -R "$PRINTPI_USER:$PRINTPI_USER" "$TARGET"
+        rm -f -- "$TARBALL" "$TARBALL.minisig"
+    fi
+    phase installing
+    refuse_print
+    step "Backing up the database"
+    backup_database
+    INSTALL_STARTED=1
+    run_installer "$TARGET"
+    local directory name active previous
+    active="$(readlink -f "$RELEASE_HOME/current")"
+    previous="$(readlink -f "$RELEASE_HOME/previous" || true)"
+    [[ "$active" == "$TARGET" ]]
+    step "Removing old releases"
+    # Pruning is housekeeping: a deletion failure must not roll back a healthy install.
+    for directory in "$RELEASE_HOME"/releases/*; do
+        [[ -d "$directory" && ! -L "$directory" ]] || continue
+        name="${directory##*/}"
+        if [[ "$name" =~ $VERSION_RE && "$directory" != "$active" && "$directory" != "$previous" ]]; then
+            rm -rf -- "$directory" || echo "Warning: could not prune $directory"
+        fi
+    done
+    phase done
+}
+
+run_rollback() {
+    start_run
+    previous_release
+    phase installing
+    INSTALL_STARTED=1
+    # Schema migrations are retained: rollback never restores the SQLite backup.
+    run_installer "$TARGET"
+    [[ "$(readlink -f "$RELEASE_HOME/current")" == "$TARGET" ]]
+    phase done
+}
+
+case "${1:-}" in
+    update|run-update)
+        command="$1"
+        shift
+        validate_update "$@"
+        [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 2; }
+        ACTION=update VERSION="$1" CHANNEL="$2"
+        if [[ "$command" == run-update ]]; then
+            run_update
+        else
+            read_install_env
+            require_update_key
+            refuse_print
+            take_lock
+            check_queue
+            status_write update "$VERSION" queued
+            if ! deferred 1 /usr/local/bin/printpi-system run-update "$VERSION" "$CHANNEL"; then
+                status_write update "$VERSION" failed "Could not schedule update."
+                exit 1
+            fi
+            echo "updating $VERSION"
+        fi
+        ;;
+    rollback|run-rollback)
+        [[ $# == 1 ]] || { echo "rollback takes no arguments" >&2; exit 2; }
+        [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 2; }
+        ACTION=rollback VERSION=unknown
+        if [[ "$1" == run-rollback ]]; then
+            run_rollback
+        else
+            read_install_env
+            previous_release
+            refuse_print
+            take_lock
+            check_queue
+            status_write rollback "$VERSION" queued
+            if ! deferred 1 /usr/local/bin/printpi-system run-rollback; then
+                status_write rollback "$VERSION" failed "Could not schedule rollback."
+                exit 1
+            fi
+            echo "rolling back to $VERSION"
+        fi
+        ;;
+    set-hostname)
+        name="${2:-}"
+        [[ "$name" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { echo "invalid hostname" >&2; exit 2; }
+        hostnamectl set-hostname "$name"
+        if grep -qE '^127\.0\.1\.1[[:space:]]' /etc/hosts; then
+            sed -i -E "s/^(127\.0\.1\.1[[:space:]]+).*/\1$name/" /etc/hosts
+        else
+            printf '127.0.1.1\t%s\n' "$name" >> /etc/hosts
+        fi
+        systemctl try-restart avahi-daemon 2>/dev/null || true
+        echo "$name"
+        ;;
+    set-timezone)
+        zone="${2:-}"
+        [[ "$zone" =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+){0,2}$ && -f "/usr/share/zoneinfo/$zone" ]] || { echo "invalid timezone" >&2; exit 2; }
+        timedatectl set-timezone "$zone"
+        echo "$zone"
+        ;;
+    get-hostname)
+        hostname
+        ;;
+    reboot)
+        deferred 2 systemctl reboot
+        echo "rebooting"
+        ;;
+    restart-web)
+        units=(nginx.service)
+        for unit in /lib/systemd/system/php*-fpm.service; do
+            [[ -f "$unit" ]] && units+=("$(basename "$unit")")
+        done
+        deferred 1 systemctl restart "${units[@]}"
+        echo "restarting ${units[*]}"
+        ;;
+    *)
+        echo "usage: printpi-system set-hostname NAME | set-timezone ZONE | get-hostname | reboot | restart-web | update VERSION stable|beta | rollback" >&2
+        exit 2
+        ;;
+esac

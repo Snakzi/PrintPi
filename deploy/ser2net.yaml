@@ -1,0 +1,12 @@
+%YAML 1.1
+---
+# Expose the printer's serial port on TCP 3333 for development from another machine.
+# The daemon on the Pi must be stopped while this is in use:
+#   sudo systemctl stop printpi-daemon
+# On the Mac:
+#   printpi-daemon --port rfc2217://printer.local:3333 --repl
+connection: &printer
+  accepter: telnet(rfc2217),tcp,3333
+  connector: serialdev,/dev/printer,115200n81,local
+  options:
+    kickolduser: true

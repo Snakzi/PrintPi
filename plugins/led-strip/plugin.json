@@ -1,0 +1,51 @@
+{
+  "id": "led-strip",
+  "name": "LED Strip",
+  "version": "1.2.0",
+  "description": "Addressable LED strip on the GPIO header: WS2812B, WS2811 and SK6812 over PWM, PCM or SPI.",
+  "author": "PrintPi",
+  "icon": "bulb",
+  "daemon": true,
+  "settings": [
+    {
+      "key": "strip_type",
+      "label": "Strip type",
+      "type": "select",
+      "default": "ws2812b",
+      "options": [
+        { "value": "ws2812b", "label": "WS2812B (GRB)" },
+        { "value": "ws2811", "label": "WS2811 (RGB)" },
+        { "value": "sk6812", "label": "SK6812 (GRB)" },
+        { "value": "sk6812_rgbw", "label": "SK6812 RGBW" }
+      ]
+    },
+    {
+      "key": "led_count",
+      "label": "LED count",
+      "type": "integer",
+      "default": 30,
+      "min": 1,
+      "max": 2000
+    },
+    {
+      "key": "gpio_pin",
+      "label": "GPIO pin",
+      "type": "select",
+      "default": 18,
+      "options": [
+        { "value": 18, "label": "GPIO 18 (PWM0)" },
+        { "value": 12, "label": "GPIO 12 (PWM0)" },
+        { "value": 13, "label": "GPIO 13 (PWM1)" },
+        { "value": 19, "label": "GPIO 19 (PWM1)" },
+        { "value": 21, "label": "GPIO 21 (PCM)" },
+        { "value": 10, "label": "GPIO 10 (SPI0 MOSI)" },
+        { "value": 20, "label": "GPIO 20 (SPI1 MOSI)" }
+      ]
+    }
+  ],
+  "controls": [
+    { "key": "power", "label": "Power", "type": "toggle", "action": "set_power", "actions": ["printer_light_on", "printer_light_off"] },
+    { "key": "color", "label": "Color", "type": "color", "action": "set_color", "actions": ["printer_light_color"] },
+    { "key": "brightness", "label": "Brightness", "type": "range", "min": 0, "max": 100, "step": 5, "unit": "%", "action": "set_brightness" }
+  ]
+}

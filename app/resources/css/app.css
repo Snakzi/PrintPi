@@ -1,0 +1,156 @@
+@import 'tailwindcss';
+
+@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+@source '../../storage/framework/views/*.php';
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol',
+    'Noto Color Emoji';
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Chart series, validated for the dark card surface (#18181b) with the dataviz palette checks. */
+  --color-series-hotend: #d95926;
+  --color-series-bed: #3987e5;
+  --color-series-chamber: #199e70;
+  --color-series-cpu: #9085e9;
+  --color-series-memory: #199e70;
+
+  /* The indeterminate progress bar: a third-width segment crossing the track. */
+  --animate-sweep: sweep 1.6s cubic-bezier(0.45, 0, 0.3, 1) infinite;
+  @keyframes sweep {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(300%);
+    }
+  }
+}
+
+/* The app is designed dark first. The light theme (data-theme="light" on <html>, see stores/theme.js)
+   mirrors the zinc scale so every class keeps its role (the page stays the darkest tone, cards the
+   lightest, text at the far end) and darkens the accent tones that serve as text on dark surfaces so
+   they still read on white. Chart series get their own light steps from the dataviz palette. */
+:root {
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --color-zinc-950: oklch(96.7% 0.001 286.375);
+  --color-zinc-900: #ffffff;
+  --color-zinc-800: oklch(92% 0.004 286.32);
+  --color-zinc-700: oklch(87.1% 0.006 286.286);
+  --color-zinc-600: oklch(70.5% 0.015 286.067);
+  --color-zinc-500: oklch(55.2% 0.016 285.938);
+  --color-zinc-400: oklch(44.2% 0.017 285.786);
+  --color-zinc-300: oklch(37% 0.013 285.805);
+  --color-zinc-200: oklch(27.4% 0.006 286.033);
+  --color-zinc-100: oklch(21% 0.006 285.885);
+  --color-zinc-50: oklch(14.1% 0.005 285.823);
+  --color-emerald-950: oklch(97.9% 0.021 166.113);
+  --color-emerald-700: oklch(84.5% 0.143 164.978);
+  --color-emerald-400: oklch(59.6% 0.145 163.225);
+  --color-emerald-300: oklch(50.8% 0.118 165.612);
+  --color-emerald-100: oklch(37.8% 0.077 168.94);
+  --color-red-950: oklch(97.1% 0.013 17.38);
+  --color-red-900: oklch(88.5% 0.062 18.334);
+  --color-red-800: oklch(80.8% 0.114 19.571);
+  --color-red-400: oklch(57.7% 0.245 27.325);
+  --color-red-300: oklch(50.5% 0.213 27.518);
+  --color-red-200: oklch(44.4% 0.177 26.899);
+  --color-red-100: oklch(39.6% 0.141 25.723);
+  --color-amber-950: oklch(98.7% 0.022 95.277);
+  --color-amber-400: oklch(66.6% 0.179 58.318);
+  --color-amber-300: oklch(55.5% 0.163 48.998);
+  --color-sky-300: oklch(50% 0.134 242.749);
+  --color-series-hotend: #eb6834;
+  --color-series-bed: #2a78d6;
+  --color-series-chamber: #159a6b;
+  --color-series-cpu: #4a3aa7;
+  --color-series-memory: #159a6b;
+}
+
+/* Native selects draw their arrow flush against the edge; every single-value select gets one chevron with room around it. */
+select:not([multiple]):not([size]) {
+  appearance: none;
+  padding-right: 2.25rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M19.5 8.25l-7.5 7.5-7.5-7.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+  background-size: 1rem 1rem;
+}
+
+/* grid-layout-plus injects its own base styles; these override the placeholder and the resize handle. */
+.vgl-item--placeholder {
+  background: rgb(16 185 129 / 0.2) !important;
+  border: 1px dashed rgb(16 185 129 / 0.6);
+  border-radius: 0.5rem;
+  opacity: 1 !important;
+}
+
+.vgl-item--dragging {
+  z-index: 30;
+}
+
+.vgl-item > .vgl-item__resizer {
+  bottom: 4px;
+  right: 4px;
+  width: 14px;
+  height: 14px;
+  background: none;
+  border-right: 2px solid rgb(113 113 122);
+  border-bottom: 2px solid rgb(113 113 122);
+  border-radius: 0 0 4px 0;
+}
+
+/* Range inputs in the widgets: a filled track up to --fill and a round thumb. */
+.slider {
+  appearance: none;
+  height: 0.375rem;
+  border-radius: 9999px;
+  background: linear-gradient(to right, var(--color-emerald-500) var(--fill, 0%), var(--color-zinc-800) var(--fill, 0%));
+  outline: none;
+  cursor: pointer;
+}
+
+.slider:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 9999px;
+  background: var(--color-zinc-100);
+  border: 2px solid var(--color-emerald-500);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.5);
+}
+
+.slider::-moz-range-thumb {
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 9999px;
+  background: var(--color-zinc-100);
+  border: 2px solid var(--color-emerald-500);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.5);
+}
+
+.slider:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--color-emerald-400);
+  outline-offset: 2px;
+}
+
+/* The touch panel: nothing on it selects, flashes on tap, opens a callout or drags an image. */
+.panel,
+.panel * {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+.panel img {
+  -webkit-user-drag: none;
+  pointer-events: none;
+}

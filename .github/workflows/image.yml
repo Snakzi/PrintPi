@@ -1,0 +1,57 @@
+# Builds the flashable Raspberry Pi image for a release and attaches it to the release:
+# printpi-<version>.img.xz plus its sha256. Runs on GitHub's arm64 runner, so the chroot
+# runs natively instead of through QEMU.
+name: Pi image
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version to build the image for (without the v)
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: image-${{ github.event.release.tag_name || inputs.version }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ inputs.version || github.event.release.tag_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - id: version
+        run: echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ steps.version.outputs.version }}
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq parted dosfstools xz-utils minisign e2fsprogs
+
+      - name: Fetch and verify the release package
+        run: |
+          mkdir -p dist
+          gh release download "v${{ steps.version.outputs.version }}" --dir dist --pattern 'printpi-${{ steps.version.outputs.version }}.tar.gz*'
+          minisign -Vqm "dist/printpi-${{ steps.version.outputs.version }}.tar.gz" -p deploy/update.pub
+
+      - name: Build the image
+        run: sudo -E PRINTPI_VERSION=${{ steps.version.outputs.version }} PRINTPI_IMAGE_WORK=/mnt/printpi-image scripts/build-image.sh
+
+      - name: Attach the image and the Imager entry to the release
+        run: |
+          cp "dist/printpi-${{ steps.version.outputs.version }}.imager.json" dist/imager.json
+          gh release upload "v${{ steps.version.outputs.version }}" \
+            "dist/printpi-${{ steps.version.outputs.version }}.img.xz" \
+            "dist/printpi-${{ steps.version.outputs.version }}.img.xz.sha256" \
+            dist/imager.json --clobber

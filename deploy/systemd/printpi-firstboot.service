@@ -1,0 +1,19 @@
+[Unit]
+Description=PrintPi first boot: app key, database and plugin list
+# Only until printpi-firstboot removes the marker the image build left behind.
+ConditionPathExists=/etc/printpi/firstboot
+# After the network (cloud-init applies the Imager's hostname before it) and Redis, before the
+# web app and the daemon serve anything.
+After=network-online.target redis-server.service
+Wants=redis-server.service
+Before=nginx.service printpi-daemon.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/printpi-firstboot
+# The log lands on the boot partition, readable from any computer the card is put into.
+StandardOutput=append:/boot/firmware/printpi-firstboot.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target

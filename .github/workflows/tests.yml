@@ -1,0 +1,71 @@
+# Runs every test suite on each push and pull request: the daemon's pytest, the web app's
+# PHPUnit and Pint check, the JavaScript tests and a production build of the frontend.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  daemon:
+    name: Daemon
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: daemon
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: daemon/pyproject.toml
+
+      - run: pip install -e ".[dev]"
+
+      - run: pytest -q
+
+  app:
+    name: Web app
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, xml, curl, zip, sqlite3, pdo_sqlite
+          coverage: none
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - run: composer install --no-interaction --no-progress --prefer-dist
+
+      - run: vendor/bin/pint --test
+
+      - run: npm ci --no-audit --no-fund
+
+      - run: npm test
+
+      - run: npm run build
+
+      - run: cp .env.example .env && php artisan key:generate --no-interaction
+
+      - run: php artisan test

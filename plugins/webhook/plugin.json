@@ -1,0 +1,32 @@
+{
+  "id": "webhook",
+  "name": "Webhook",
+  "version": "1.0.0",
+  "description": "Posts every printer event as JSON to a URL: Home Assistant, n8n, Node-RED, Discord or your own script.",
+  "author": "PrintPi",
+  "icon": "send",
+  "daemon": true,
+  "settings": [
+    {
+      "key": "url",
+      "label": "URL",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "key": "secret",
+      "label": "Secret",
+      "type": "password",
+      "default": ""
+    },
+    {
+      "key": "in_app",
+      "label": "Show print events as notifications",
+      "type": "boolean",
+      "default": false
+    }
+  ],
+  "controls": [
+    { "key": "test", "label": "Send a test event", "type": "button", "action": "test" }
+  ]
+}

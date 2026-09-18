@@ -1,0 +1,16 @@
+.git
+.DS_Store
+node_modules
+daemon/.venv
+__pycache__
+.pytest_cache
+*.egg-info
+app/.env
+app/storage/logs/*
+app/storage/framework/cache/*
+app/storage/framework/sessions/*
+app/storage/framework/views/*
+app/storage/app/*
+app/database/database.sqlite
+app/.mcp.json
+app/public/hot

@@ -1,0 +1,27 @@
+# PrintPi in a container. `docker compose up -d` pulls the published image, or builds it from
+# this checkout with `docker compose up -d --build`. See README.md, section "Docker".
+services:
+  printpi:
+    image: ghcr.io/snakzi/printpi:latest
+    build: .
+    container_name: printpi
+    hostname: printpi
+    restart: unless-stopped
+    ports:
+      - "8050:80"
+    volumes:
+      - printpi-data:/var/lib/printpi
+    devices:
+      # The printer's USB port; /dev/printer is the name the daemon expects.
+      - /dev/ttyACM0:/dev/printer
+      # A USB camera for the camera page and the timelapse.
+      # - /dev/video0:/dev/video0
+    environment:
+      TZ: Europe/Berlin
+      # Every line on the wire, the most useful file when a print goes wrong. Grows unbounded.
+      # PRINTPI_SERIAL_LOG: /var/lib/printpi/serial.log
+    # The daemon finishes its shutdown within 10 s; Redis then writes its snapshot.
+    stop_grace_period: 30s
+
+volumes:
+  printpi-data:

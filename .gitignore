@@ -1,0 +1,18 @@
+# Python
+daemon/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Logs
+*.log
+
+# OS and editors
+.DS_Store
+.idea/
+.vscode/
+
+
+# Release artifacts
+dist/

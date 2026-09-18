@@ -1,0 +1,31 @@
+[Unit]
+Description=PrintPi touch panel
+After=nginx.service systemd-user-sessions.service getty@tty1.service
+Conflicts=getty@tty7.service
+Wants=nginx.service
+ConditionPathExists=/etc/printpi/panel.env
+
+[Service]
+Type=simple
+User=__USER__
+# A logind session on a VT gives the compositor the seat: the display and the touch screen.
+PAMName=login
+TTYPath=/dev/tty7
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty7
+UtmpMode=user
+UnsetEnvironment=TERM
+EnvironmentFile=/etc/printpi/panel.env
+# The session only becomes active on the VT the console shows; switch there as root first.
+ExecStartPre=+/usr/bin/chvt 7
+ExecStart=/usr/local/bin/printpi-panel
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

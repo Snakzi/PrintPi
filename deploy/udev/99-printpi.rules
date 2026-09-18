@@ -1,0 +1,12 @@
+# Give the printer a stable name, /dev/printer, whatever USB chip the board uses.
+# With more than one USB serial device attached, narrow this down with the values from
+#   udevadm info -a -n /dev/ttyUSB0 | grep -E 'idVendor|idProduct'
+# e.g. ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523" for a CH340.
+SUBSYSTEM=="tty", KERNEL=="ttyUSB[0-9]*|ttyACM[0-9]*", SYMLINK+="printer", GROUP="dialout", MODE="0660"
+
+# The LED strip plugin drives WS281x strips on PWM pins through DMA: rpi_ws281x
+# programs the peripherals via /dev/mem and allocates DMA memory through the
+# VideoCore mailbox /dev/vcio. The daemon runs in the kmem and video groups
+# instead of as root.
+KERNEL=="mem", GROUP="kmem", MODE="0660"
+KERNEL=="vcio", GROUP="video", MODE="0660"

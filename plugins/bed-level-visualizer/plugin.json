@@ -1,0 +1,32 @@
+{
+  "id": "bed-level-visualizer",
+  "name": "Bed Level Visualizer",
+  "version": "1.2.0",
+  "description": "Probes the bed and draws the measured mesh, so high and low spots are visible before a print.",
+  "author": "PrintPi",
+  "icon": "grid",
+  "daemon": true,
+  "settings": [
+    {
+      "key": "gcode",
+      "label": "Probe G-code",
+      "type": "text",
+      "default": "M140 S60\nM104 S170\nM190 S60\nM109 R170\nG28\nG29\nM420 V\nM104 S0\nM140 S0"
+    },
+    {
+      "key": "tolerance",
+      "label": "Tolerance (mm)",
+      "type": "number",
+      "default": 0.1,
+      "min": 0.01,
+      "max": 2
+    },
+    { "key": "x_min", "label": "Mesh X from (mm)", "type": "integer", "default": 0, "min": 0, "max": 2000 },
+    { "key": "x_max", "label": "Mesh X to (mm)", "type": "integer", "default": 0, "min": 0, "max": 2000 },
+    { "key": "y_min", "label": "Mesh Y from (mm)", "type": "integer", "default": 0, "min": 0, "max": 2000 },
+    { "key": "y_max", "label": "Mesh Y to (mm)", "type": "integer", "default": 0, "min": 0, "max": 2000 }
+  ],
+  "controls": [
+    { "key": "mesh", "label": "Bed mesh", "type": "mesh", "action": "probe" }
+  ]
+}
