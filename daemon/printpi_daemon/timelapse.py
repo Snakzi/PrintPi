@@ -2,13 +2,13 @@
 
 The bridge opens a recording when a job starts, asks for a frame at every layer
 change and closes it when the job ends; the first frame shows the empty bed and
-the last one the finished part, taken the moment the nozzle has finished, before
-the end G-code parks the head and moves the part out of view. Frames come from
-ustreamer's snapshot endpoint or
-from any MJPEG stream URL (the first frame of the multipart body) and are written
-as JPEG files under <root>/<job id>/. Closing keeps the last frame as cover.jpg
-and assembles timelapse.gif with Pillow, plus timelapse.mp4 when ffmpeg is on the
-PATH. The web app serves those files, so the root defaults to its storage.
+the last one the finished part, taken once the end G-code has parked the head out
+of the picture and before the job is reported as finished. Frames come from
+ustreamer's snapshot endpoint or from any MJPEG stream URL (the first frame of the
+multipart body) and are written as JPEG files under <root>/<job id>/. Closing
+keeps the last frame as cover.jpg and assembles timelapse.gif with Pillow, plus
+timelapse.mp4 when ffmpeg is on the PATH. The web app serves those files, so the
+root defaults to its storage.
 """
 
 from __future__ import annotations
@@ -28,10 +28,12 @@ from typing import Callable
 log = logging.getLogger("printpi.timelapse")
 
 FRAME_TIMEOUT = 5.0
-# How long the print waits for its closing frame; Buddy ends a serial print after 5 s of silence.
-FINAL_FRAME_WAIT = 3.0
+# How long the job holds its end for the closing frame, so a camera that stopped answering
+# cannot keep a finished print in "printing".
+FINAL_FRAME_WAIT = FRAME_TIMEOUT
 MAX_FRAME_BYTES = 8 << 20
 MIN_INTERVAL = 2.0  # thin layers on a small part change faster than a camera is worth sampling
+PENDING_GRABS = 2  # layer grabs queued behind a slow camera before further ones are dropped
 MAX_GIF_FRAMES = 120
 GIF_WIDTH = 480
 GIF_FRAME_MS = 80
@@ -124,12 +126,11 @@ class TimelapseRecorder:
             recording.request()
 
     def capture_final(self, timeout: float = FINAL_FRAME_WAIT) -> None:
-        """The closing frame, taken now and waited for: the part is still in view only until the
-        next move goes out, so the caller holds the print until the frame is on disk."""
+        """The closing frame, taken now and waited for, so the finished part is on disk before the
+        job ends and the record goes out."""
         with self._lock:
             recording = self._recording
-        if recording is not None:
-            recording.request(force=True, wait=timeout)
+        if recording is not None and recording.request(force=True, wait=timeout):
             recording.final_taken = True
 
     @property
@@ -160,7 +161,7 @@ class _Recording:
         self.source = source
         self._fetch = fetch
         self._min_interval = min_interval
-        self._requests: queue.Queue[tuple[bool, threading.Event | None] | None] = queue.Queue(maxsize=2)
+        self._requests: queue.Queue[tuple[bool, threading.Event | None] | None] = queue.Queue()
         self._frames = 0
         self._last_capture = 0.0
         self._error: str | None = None
@@ -172,15 +173,17 @@ class _Recording:
     def frames(self) -> int:
         return self._frames
 
-    def request(self, force: bool = False, wait: float | None = None) -> None:
-        """Ask for a frame; with `wait` block until it is taken, at most that many seconds."""
+    def request(self, force: bool = False, wait: float | None = None) -> bool:
+        """Ask for a frame; with `wait` block until it is taken, at most that many seconds. A layer
+        grab is dropped (False) while others are pending, since the layer will look the same; a
+        forced one always queues, so the opening and closing frames are never lost."""
+        if not force and self._requests.qsize() >= PENDING_GRABS:
+            return False
         done = threading.Event() if wait is not None else None
-        try:
-            self._requests.put_nowait((force, done))
-        except queue.Full:
-            return  # a grab is already pending, the layer will look the same
+        self._requests.put((force, done))
         if done is not None:
             done.wait(wait)
+        return True
 
     def close(self, *, gif: bool = True, mp4: bool = True) -> dict:
         self._requests.put(None)

@@ -169,6 +169,28 @@ def test_the_final_frame_is_waited_for_and_not_taken_twice(tmp_path):
     assert os.path.isfile(result["cover"])
 
 
+def test_the_final_frame_queues_behind_pending_grabs(tmp_path):
+    calls: list[str] = []
+    release = threading.Event()
+
+    def slow_fetch(url: str) -> bytes:
+        calls.append(url)
+        release.wait(5)
+        return jpeg()
+
+    recorder = TimelapseRecorder(str(tmp_path), min_interval=60, fetch=slow_fetch)
+    recorder.begin("job5", "http://cam/snapshot")
+    assert wait_for(lambda: len(calls) == 1)  # the opening frame holds the worker
+    recorder.capture()
+    recorder.capture()
+    recorder.capture()  # dropped, two layer grabs are pending already
+    recorder.capture_final(timeout=0.1)  # queued all the same, and not waited for beyond that
+    release.set()
+    result = recorder.finish()
+    # The layer grabs were within the interval and skipped, the closing frame was taken.
+    assert result["frames"] == 2 and len(calls) == 2
+
+
 def test_assemble_makes_only_the_files_asked_for(tmp_path):
     def frames_in(name: str) -> str:
         directory = tmp_path / name

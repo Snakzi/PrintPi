@@ -27,10 +27,10 @@ lifts and parks, and puts everything back on resume. The printer's host action
 commands ("// action:pause", "resume", "cancel") drive the job the same way, so a
 pause at the printer's screen or an M601 in the file pauses the stream too.
 
-The runner also knows when the part itself is done: the pre-scan finds the last
-extruding move, and before the first travel after it (the end G-code's park) the
-runner waits for the moves to finish and calls `on_part_finished`, which is when
-the timelapse takes its closing frame with the part still in view.
+Once the last line of the file is out, the runner sends M400 so the end G-code's
+park is really over and calls `on_complete` while the job still counts as
+printing, which is when the timelapse takes its closing frame: the finished part
+with the head parked out of the picture.
 """
 
 from __future__ import annotations
@@ -78,9 +78,6 @@ _SKIPPED_LINE_RE = re.compile(rb"^[ \t]*(?:;[^\n]*)?\r?\n", re.MULTILINE)
 _LAYER_MARKER_PREFIXES = (b";LAYER_CHANGE", b";LAYER:", b"; LAYER_CHANGE", b"; LAYER:")
 _SCAN_CHUNK = 1 << 20
 _FEEDRATE_RE = re.compile(r"\bF(\d+(?:\.\d+)?)", re.IGNORECASE)
-# A move that pushes filament: G0/G1 with a positive E word.
-_EXTRUSION_LINE_RE = re.compile(rb"^[ \t]*G[01]\b[^\n;]*?[ \t]E(\d*\.?\d+)", re.MULTILINE | re.IGNORECASE)
-_TAIL_WINDOW = 1 << 18
 
 JobListener = Callable[["JobState"], None]
 
@@ -219,43 +216,6 @@ def scan_file(path: str) -> tuple[int, int, int]:
     return lines, layers, command_bytes
 
 
-def last_extrusion_line(path: str, total_lines: int) -> int | None:
-    """The 1-based line of the last move that extrudes, searched from the end of the file."""
-    size = os.path.getsize(path)
-    window = _TAIL_WINDOW
-    with open(path, "rb") as handle:
-        while True:
-            start = max(0, size - window)
-            handle.seek(start)
-            data = handle.read(size - start)
-            if start > 0:
-                cut = data.find(b"\n") + 1  # the first line may be cut in two
-                data, start = data[cut:], start + cut
-            matches = [match for match in _EXTRUSION_LINE_RE.finditer(data) if float(match.group(1)) > 0]
-            if matches:
-                after = data.count(b"\n", matches[-1].start())
-                return total_lines - after + (1 if data.endswith(b"\n") else 0)
-            if start == 0:
-                return None
-            window *= 4
-
-
-def leaves_the_part(command: str) -> bool:
-    """A move that takes the nozzle away from the part after the last extrusion: a travel, a park,
-    homing. A wipe (an XY move that retracts) still runs over the part and does not count."""
-    words = command.upper().split()
-    if not words:
-        return False
-    code = words[0]
-    if code in ("G28", "G27"):
-        return True
-    if code not in ("G0", "G1"):
-        return False
-    moves = any(word[0] in "XY" for word in words[1:])
-    retracts = any(word.startswith("E-") for word in words[1:])
-    return moves and not retracts
-
-
 class SerialJobRunner(JobBackend):
     """Streams a file through Printer.send() on a background thread."""
 
@@ -264,13 +224,13 @@ class SerialJobRunner(JobBackend):
         printer_provider: Callable[[], Printer],
         *,
         on_state: JobListener | None = None,
-        on_part_finished: JobListener | None = None,
+        on_complete: JobListener | None = None,
         cancel_gcode: list[str] | None = None,
         publish_interval: float = 0.5,
     ) -> None:
         self._printer_of = printer_provider
         self.on_state = on_state
-        self.on_part_finished = on_part_finished
+        self.on_complete = on_complete
         self.cancel_gcode = list(cancel_gcode if cancel_gcode is not None else DEFAULT_CANCEL_GCODE)
         self.publish_interval = publish_interval
 
@@ -289,8 +249,6 @@ class SerialJobRunner(JobBackend):
         self._relative_positioning = False  # G91 seen in the file
         self._relative_extrusion = False  # M83 seen in the file
         self._feedrate: float | None = None  # the last F of a move in the file
-        self._last_extrusion: int | None = None  # line of the last extruding move
-        self._part_finished = False
         self._started = 0.0  # monotonic clock, for durations
         self._finished: float | None = None
         self._paused_total = 0.0
@@ -340,8 +298,6 @@ class SerialJobRunner(JobBackend):
             self._pause_position = None
             self._relative_positioning = self._relative_extrusion = False
             self._feedrate = None
-            self._last_extrusion = None
-            self._part_finished = False
             self._started = time.monotonic()
             self._finished = None
             self._paused_total = 0.0
@@ -474,7 +430,6 @@ class SerialJobRunner(JobBackend):
 
     def _stream(self, job: JobState, printer: Printer) -> None:
         job.total_lines, job.total_layers, job.total_bytes = scan_file(job.path)
-        self._last_extrusion = last_extrusion_line(job.path, job.total_lines)
         self._publish(job, force=True)
         with open(job.path, "rb") as handle:
             for raw in handle:
@@ -503,14 +458,14 @@ class SerialJobRunner(JobBackend):
                 self._track_m73(command)
                 self._track_modes(command)
                 self._track_activity(job, command)
-                if self._part_is_done(job) and leaves_the_part(command):
-                    self._finish_part(job, printer)
                 printer.send(command)
                 with self._lock:
                     job.line = consumed
                     job.bytes_sent += len(raw)
                 self._poll_temperature(printer)
                 self._publish(job)
+        if not self._cancelled:
+            self._complete(job, printer)
 
     def _wait_while_paused(self, job: JobState, printer: Printer) -> None:
         with self._cv:
@@ -543,19 +498,20 @@ class SerialJobRunner(JobBackend):
                 self._end_pause(job)
                 self._publish(job, force=True)
 
-    def _part_is_done(self, job: JobState) -> bool:
-        return not self._part_finished and self._last_extrusion is not None and job.line >= self._last_extrusion
-
-    def _finish_part(self, job: JobState, printer: Printer) -> None:
-        """The last extrusion is out and the next move leaves the part: let the moves finish and
-        tell the listener, which takes the closing timelapse frame while the part is in view."""
-        self._part_finished = True
-        printer.send("M400")
-        if self.on_part_finished is not None:
+    def _complete(self, job: JobState, printer: Printer) -> None:
+        """The file is through: let the end G-code's moves finish and tell the listener, which
+        takes the closing timelapse frame of the finished part before the job ends."""
+        try:
+            printer.send("M400")
+        except PrinterError as exc:
+            # Every line of the file was acknowledged; a printer that is gone now does not
+            # turn the print into a failed one.
+            log.warning("could not wait for the last moves: %s", exc)
+        if self.on_complete is not None:
             try:
-                self.on_part_finished(copy.copy(job))
+                self.on_complete(copy.copy(job))
             except Exception:  # noqa: BLE001 - a listener must not end the print
-                log.exception("part finished listener failed")
+                log.exception("print complete listener failed")
 
     def _end_pause(self, job: JobState) -> None:
         if self._pause_began is not None:

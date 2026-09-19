@@ -200,7 +200,7 @@ class RedisBridge:
         self._last_connection: dict | None = None
         # The runner asks for the printer on every start, since connect may replace it.
         self.jobs = SerialJobRunner(lambda: self.printer, on_state=self._on_job_state,
-                                    on_part_finished=lambda job: self.timelapse.capture_final())
+                                    on_complete=lambda job: self.timelapse.capture_final())
         self.filament = FilamentRunner(lambda: self.printer, on_state=self._on_filament_state,
                                        on_record=self._on_filament_record)
         # Connect and disconnect take their turn on the command worker like the UI's commands do.

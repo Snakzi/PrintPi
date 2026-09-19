@@ -122,6 +122,8 @@ def test_streams_the_file_and_finishes(printer, runner, seen, tmp_path):
 
     assert wait_for(lambda: runner.state.state == "finished")
     sent = commands(printer)
+    assert sent[-1] == "M400"  # the end waits for the last moves before the job is over
+    sent = sent[:-1]
     assert sent[-6:] == ["G1 X10 Y10 F3000", "G1 X20 Y10 E1", "G1 X20 Y20 E2", "G1 X10 Y20 E3", "M73 P100 R0", "M105"] or \
         sent[-5:] == ["G1 X10 Y10 F3000", "G1 X20 Y10 E1", "G1 X20 Y20 E2", "G1 X10 Y20 E3", "M73 P100 R0"]
     assert not any(command.startswith(";") for command in sent)
@@ -506,39 +508,22 @@ def test_a_cancel_at_the_printer_ends_the_job(seen, tmp_path):
 END_GCODE = "G1 Z10 F720 ; lift\nG1 X241 Y170 F3600 ; park\nM104 S0\nM84\n"
 
 
-def test_the_last_extrusion_line_is_found_from_the_end(tmp_path):
-    from printpi_daemon.job import last_extrusion_line, leaves_the_part
-
-    text = "G28\n" + moves(30) + "G1 X5 Y5 E-0.8 ; wipe\n" + END_GCODE
-    path = gcode_file(tmp_path, text)
-    total = text.count("\n")
-    assert last_extrusion_line(path, total) == 31  # G28 is line 1, the 30 moves follow
-    assert last_extrusion_line(gcode_file(tmp_path, "G28\nM84\n", "empty.gcode"), 2) is None
-    assert last_extrusion_line(gcode_file(tmp_path, "G1 X1 E1", "bare.gcode"), 1) == 1
-    big = gcode_file(tmp_path, moves(3) + ";" + "x" * (1 << 19) + "\n" + END_GCODE, "big.gcode")
-    assert last_extrusion_line(big, 3 + 1 + 4) == 3  # beyond the first window from the end
-    assert leaves_the_part("G1 X241 Y170 F3600") and leaves_the_part("G28") and leaves_the_part("G0 Y0")
-    assert not leaves_the_part("G1 Z10 F720") and not leaves_the_part("G1 X5 Y5 E-0.8") and not leaves_the_part("M84")
-
-
-def test_the_closing_frame_is_taken_before_the_park_move(printer, seen, tmp_path):
-    finished: list[tuple[int, int]] = []
+def test_the_closing_frame_is_taken_after_the_end_gcode(printer, seen, tmp_path):
+    complete: list[tuple[str, int, list[str]]] = []
     runner = SerialJobRunner(
         lambda: printer,
         on_state=seen.append,
-        on_part_finished=lambda job: finished.append((job.line, len(commands(printer)))),
+        on_complete=lambda job: complete.append((job.state, job.line, commands(printer)[-3:])),
         publish_interval=0.0,
     )
     try:
-        runner.start(gcode_file(tmp_path, moves(20) + "G1 X3 Y3 E-0.8 ; wipe\n" + END_GCODE), name="part.gcode")
+        text = moves(20) + "G1 X3 Y3 E-0.8 ; wipe\n" + END_GCODE
+        runner.start(gcode_file(tmp_path, text), name="part.gcode")
         assert wait_for(lambda: runner.state.state == "finished")
-        sent = commands(printer)
-        assert len(finished) == 1
-        # After the wipe and the lift, the moves were flushed with M400 and only then the park went out.
-        wait_index = sent.index("M400")
-        assert sent[wait_index - 2:wait_index] == ["G1 X3 Y3 E-0.8", "G1 Z10 F720"]
-        assert sent[wait_index + 1] == "G1 X241 Y170 F3600"
-        assert finished[0][1] == wait_index + 1  # the listener ran before the park move was sent
+        # The whole file was out and its moves flushed with M400 when the listener ran, and the
+        # job still counted as printing so the frame lands before the record goes out.
+        assert complete == [("printing", text.count("\n"), ["M104 S0", "M84", "M400"])]
+        assert commands(printer)[-1] == "M400"
     finally:
         runner.stop()
 
