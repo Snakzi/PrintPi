@@ -54,8 +54,10 @@ async function emergencyStop() {
     <p v-if="printer.apiError" class="truncate text-sm text-red-400">API: {{ printer.apiError }}</p>
 
     <div class="ml-auto flex items-center gap-2">
-      <PrinterLightButton v-if="printer.light" class="hidden md:block" />
-      <PrinterPowerButton v-if="printer.power" class="hidden md:inline-flex" />
+      <!-- Both switches sit in the drawer on a phone. max-md, since the switch's own inline-flex
+           is emitted after hidden and would win. -->
+      <PrinterLightButton v-if="printer.light" class="max-md:hidden" />
+      <PrinterPowerButton v-if="printer.power" class="max-md:hidden" />
       <template v-if="printer.connected">
         <button class="rounded-md border border-zinc-700 px-3 py-1.5 text-sm whitespace-nowrap hover:bg-zinc-800" title="Disconnect" @click="disconnect">
           <span class="hidden sm:inline">Disconnect</span>
