@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { usePrinterStore } from '../stores/printer';
 import { usePrintStartStore } from '../stores/printStart';
 import { useFilamentChangeStore } from '../stores/filamentChange';
@@ -28,11 +28,6 @@ const printStart = usePrintStartStore();
 const change = useFilamentChangeStore();
 const screen = ref('home');
 
-// No terminal here, so the poll skips the serial log; the Pi's browser has little to spare.
-printer.withSerial = false;
-onBeforeUnmount(() => {
-  printer.withSerial = true;
-});
 const current = computed(() => SCREENS.find((entry) => entry.id === screen.value) ?? SCREENS[0]);
 
 // A print that starts pulls the panel onto its screen, a filament walkthrough onto its own.

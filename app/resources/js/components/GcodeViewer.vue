@@ -16,9 +16,11 @@ import {
   WebGLRenderer,
 } from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { useVisible } from '../composables/useVisible';
 import { FEATURES, TRAVEL_COLOR } from '../gcode/features';
 import { segmentsUpToLine } from '../gcode/parse';
 import { useGcodeModelStore } from '../stores/gcodeModels';
+import { renderOnDemand } from '../three/renderOnDemand';
 import { GRID_STEP, bedArea as profileArea, bedGrid, disposeObject, fitCamera, retint, themeColor } from '../three/scene';
 import GcodeLayerSlider from './GcodeLayerSlider.vue';
 import GcodeLegend from './GcodeLegend.vue';
@@ -41,6 +43,7 @@ const emit = defineEmits(['loaded']);
 
 const models = useGcodeModelStore();
 const container = ref(null);
+const visible = useVisible(container);
 // The store downloads and parses once per file; this component only draws what it holds.
 const entry = computed(() => models.entryFor(props.file));
 const phase = computed(() => entry.value?.phase ?? 'loading');
@@ -59,13 +62,19 @@ let renderer = null;
 let scene = null;
 let camera = null;
 let controls = null;
-let frame = 0;
 let observer = null;
 let extrusionLines = null;
 let travelLines = null;
 let upcomingLines = null;
 let headMarker = null;
 let bedGroup = null;
+
+const rendering = renderOnDemand(() => {
+  const moved = controls.update();
+  renderer.render(scene, camera);
+  return moved;
+});
+watch(visible, (value) => rendering.setVisible(value));
 
 function setupScene() {
   renderer = new WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -84,11 +93,11 @@ function setupScene() {
   controls.dampingFactor = 0.12;
   controls.screenSpacePanning = true;
   controls.maxPolarAngle = Math.PI * 0.95;
+  controls.addEventListener('change', rendering.request);
 
   observer = new ResizeObserver(resize);
   observer.observe(container.value);
   resize();
-  animate();
 }
 
 function resize() {
@@ -99,17 +108,13 @@ function resize() {
   renderer.setSize(width, height, false);
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
+  rendering.request();
 }
 
 function onTheme() {
   renderer?.setClearColor(themeColor('--color-zinc-950'));
   if (scene) retint(scene);
-}
-
-function animate() {
-  frame = requestAnimationFrame(animate);
-  controls.update();
-  renderer.render(scene, camera);
+  rendering.request();
 }
 
 function buildModel(parsed) {
@@ -175,6 +180,7 @@ function applyLayer() {
   const shown = layer.value;
   extrusionLines.geometry.setDrawRange(0, shown > 0 ? parsed.layerExtrusionEnd[shown - 1] * 2 : 0);
   travelLines.geometry.setDrawRange(0, shown > 0 ? parsed.layerTravelEnd[shown - 1] * 2 : 0);
+  rendering.request();
 }
 
 function applyProgress() {
@@ -188,6 +194,7 @@ function applyProgress() {
   upcomingLines.visible = showUpcoming.value;
   travelLines.geometry.setDrawRange(0, travelled * 2);
   placeMarker(parsed, printed, travelled);
+  rendering.request();
 }
 
 /** The nozzle sits at the end of the latest segment, whichever kind came last in the file. */
@@ -229,6 +236,7 @@ function buildBed() {
     bedGroup = null;
   }
   const area = bedArea();
+  rendering.request();
   if (!area) return;
   bedGroup = bedGrid(area);
   scene.add(bedGroup);
@@ -246,12 +254,14 @@ function fitView() {
     box.set(new Vector3(area.minX, area.minY, 0), new Vector3(area.minX + area.sizeX, area.minY + area.sizeY, 0));
   }
   fitCamera(camera, controls, box);
+  rendering.request();
 }
 
 function dispose() {
-  cancelAnimationFrame(frame);
+  rendering.dispose();
   window.removeEventListener('printpi:theme', onTheme);
   observer?.disconnect();
+  controls?.removeEventListener('change', rendering.request);
   controls?.dispose();
   if (scene) disposeObject(scene);
   renderer?.dispose();
@@ -261,6 +271,7 @@ function dispose() {
 watch(layer, applyLayer);
 watch(showTravel, (visible) => {
   if (travelLines) travelLines.visible = visible;
+  rendering.request();
 });
 watch(() => props.printedLine, applyProgress);
 watch(showUpcoming, applyProgress);

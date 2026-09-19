@@ -1,8 +1,8 @@
 import { defineStore } from 'pinia';
-import { api } from '../api';
-import { notificationText, notificationToastType, unseenNotifications } from '../notifications/unseen';
-import { useSettingsStore } from './settings';
-import { useToastStore } from './toasts';
+import { api } from '../api.js';
+import { notificationText, notificationToastType, unseenNotifications } from '../notifications/unseen.js';
+import { useSettingsStore } from './settings.js';
+import { useToastStore } from './toasts.js';
 
 const HISTORY_MS = 10 * 60 * 1000;
 
@@ -39,8 +39,9 @@ export const usePrinterStore = defineStore('printer', {
     /** The daemon's newest notifications and the time of the newest one already shown as a toast. */
     notifications: [],
     notificationsSeenAt: null,
-    /** Whether every poll also fetches the serial log; the touch panel has no terminal and switches it off. */
-    withSerial: true,
+    /** Visible terminals that need the serial log, including multiple dashboard widgets. */
+    serialConsumers: 0,
+    refreshing: false,
   }),
 
   getters: {
@@ -100,8 +101,10 @@ export const usePrinterStore = defineStore('printer', {
         toasts.push(notificationText(item), notificationToastType(item.level), item.level === 'info' ? 4000 : 6000);
       }
     },
-    /** State is always fetched; temperatures and the serial log only once a printer is connected. */
+    /** State is always fetched; serial data only for a connected printer with a visible terminal. */
     async refresh() {
+      if (this.refreshing) return;
+      this.refreshing = true;
       try {
         const state = await api('printer/state');
         this.daemonAlive = state.daemon_alive;
@@ -115,7 +118,7 @@ export const usePrinterStore = defineStore('printer', {
         this.apiError = null;
         if (this.connected) {
           this.recordSample();
-          if (this.withSerial) {
+          if (this.serialConsumers > 0) {
             const log = await api('printer/serial?limit=300');
             this.serial = log.lines;
           }
@@ -125,6 +128,8 @@ export const usePrinterStore = defineStore('printer', {
         }
       } catch (error) {
         this.apiError = error.message;
+      } finally {
+        this.refreshing = false;
       }
     },
 

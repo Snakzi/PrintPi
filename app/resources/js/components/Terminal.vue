@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue';
+import { useVisible } from '../composables/useVisible';
 import { usePrinterStore } from '../stores/printer';
 import Icon from './Icon.vue';
 import ToggleButton from './ToggleButton.vue';
@@ -15,7 +16,14 @@ const hideTemperatures = ref(true);
 const history = ref([]);
 const historyIndex = ref(-1);
 const scroller = ref(null);
+const visible = useVisible(scroller);
 const error = ref(null);
+
+watch(visible, (active, previous, onCleanup) => {
+  if (!active) return;
+  printer.serialConsumers += 1;
+  onCleanup(() => { printer.serialConsumers -= 1; });
+}, { flush: 'sync' });
 
 const TEMPERATURE_LINE = /^(ok\s+)?\s*T\d*:\s*-?\d/;
 
